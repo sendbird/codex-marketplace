@@ -1,0 +1,20 @@
+{
+  "name": "sendbird",
+  "interface": {
+    "displayName": "Sendbird Plugins"
+  },
+  "plugins": [
+    {
+      "name": "cc",
+      "source": {
+        "source": "local",
+        "path": "./plugins/cc"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Coding"
+    }
+  ]
+}
