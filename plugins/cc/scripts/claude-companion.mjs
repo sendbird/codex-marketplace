@@ -10,9 +10,11 @@
  *
  * Adapted from codex-companion.mjs:
  * - Uses claude-cli.mjs instead of app-server/broker
- * - MODEL_ALIASES: sonnet -> claude-sonnet-4-6, haiku -> claude-haiku-4-5
- * - Claude CLI effort values: low, medium, high, max
- * - Legacy effort aliases: none|minimal -> low, xhigh -> max
+ * - MODEL_ALIASES: opus -> claude-opus-4-7[1m], sonnet -> claude-sonnet-4-6[1m], haiku -> claude-haiku-4-5
+ * - Default model when --model is unset: opus
+ * - Default effort by model: opus -> xhigh, sonnet -> high, haiku -> unset
+ * - Claude CLI effort values: low, medium, high, xhigh, max
+ * - Legacy effort aliases: none|minimal -> low
  * - Review gate matches upstream setup semantics: Stop hook runs when enabled
  *
  * Subcommands:
@@ -37,10 +39,20 @@ import {
   cancelClaudeProcess,
   MODEL_ALIASES,
   resolveEffort,
+  resolveDefaultModel,
+  resolveDefaultEffort,
   SANDBOX_READ_ONLY_TOOLS,
   createSandboxSettings,
   cleanupSandboxSettings,
+  createReviewMcpConfig,
+  cleanupReviewMcpConfig,
+  pruneStaleSandboxSettings,
+  pruneStaleReviewMcpConfigs,
 } from "./lib/claude-cli.mjs";
+import {
+  createReviewIsolation,
+  pruneStaleReviewWorktrees,
+} from "./lib/review-worktree.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import {
   collectReviewContext,
@@ -112,9 +124,9 @@ function printUsage() {
     [
       "Usage:",
       "  node scripts/claude-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
-      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|sonnet|haiku>] [--effort <low|medium|high|max>] [prompt]",
+      "  node scripts/claude-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>]",
+      "  node scripts/claude-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [focus text]",
+      "  node scripts/claude-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|opus|sonnet|haiku>] [--effort <low|medium|high|xhigh|max>] [prompt]",
       "  node scripts/claude-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/claude-companion.mjs result [job-id] [--json]",
       "  node scripts/claude-companion.mjs cancel [job-id] [--json]",
@@ -462,6 +474,11 @@ async function executeReviewRun(request) {
   ensureClaudeReady(request.cwd);
   ensureGitRepository(request.cwd);
 
+  // Sweep dead resources from previous crashed runs before allocating new ones.
+  try { pruneStaleReviewWorktrees(request.cwd); } catch {}
+  try { pruneStaleSandboxSettings(); } catch {}
+  try { pruneStaleReviewMcpConfigs(); } catch {}
+
   const target = resolveReviewTarget(request.cwd, {
     base: request.base,
     scope: request.scope
@@ -470,19 +487,32 @@ async function executeReviewRun(request) {
   const reviewName = request.reviewName ?? "Review";
 
   if (reviewName === "Review") {
-    // Standard review via Claude CLI — read-only sandbox
+    // Standard review via Claude CLI — read-only sandbox + ephemeral worktree.
     const context = collectReviewContext(request.cwd, target);
     const prompt = buildReviewPrompt(context);
-    const sandboxSettingsFile = createSandboxSettings("read-only");
     let result;
+    const sandboxSettingsFile = createSandboxSettings("read-only");
     try {
-      result = await runClaudeReview(request.cwd, prompt, {
-        model: request.model,
-        onProgress: request.onProgress,
-        onSpawn: request.onSpawn,
-        permissionMode: "dontAsk",
-        settingsFile: sandboxSettingsFile,
-      });
+      const isolation = createReviewIsolation(request.cwd, target, { label: "review" });
+      try {
+        const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
+        try {
+          result = await runClaudeReview(isolation.cwd, prompt, {
+            model: request.model,
+            effort: request.effort,
+            onProgress: request.onProgress,
+            onSpawn: request.onSpawn,
+            permissionMode: "dontAsk",
+            settingsFile: sandboxSettingsFile,
+            mcpConfigFile,
+            strictMcpConfig: true,
+          });
+        } finally {
+          cleanupReviewMcpConfig(mcpConfigFile);
+        }
+      } finally {
+        isolation.cleanup();
+      }
     } finally {
       cleanupSandboxSettings(sandboxSettingsFile);
     }
@@ -523,25 +553,40 @@ async function executeReviewRun(request) {
     };
   }
 
-  // Adversarial review with structured output — read-only sandbox
+  // Adversarial review with structured output — read-only sandbox + ephemeral worktree.
   const context = collectReviewContext(request.cwd, target);
   const prompt = buildAdversarialReviewPrompt(context, focusText);
   const schema = readOutputSchema(REVIEW_SCHEMA_PATH);
-  const sandboxSettingsFile = createSandboxSettings("read-only");
   let result;
+  const sandboxSettingsFile = createSandboxSettings("read-only");
   try {
-    result = await runClaudeAdversarialReview(
-      context.repoRoot,
-      prompt,
-      schema,
-      {
-        model: request.model,
-        onProgress: request.onProgress,
-        onSpawn: request.onSpawn,
-        permissionMode: "dontAsk",
-        settingsFile: sandboxSettingsFile,
+    const isolation = createReviewIsolation(context.repoRoot, target, {
+      label: "adversarial-review",
+    });
+    try {
+      const mcpConfigFile = createReviewMcpConfig(isolation.gitRoot);
+      try {
+        result = await runClaudeAdversarialReview(
+          isolation.cwd,
+          prompt,
+          schema,
+          {
+            model: request.model,
+            effort: request.effort,
+            onProgress: request.onProgress,
+            onSpawn: request.onSpawn,
+            permissionMode: "dontAsk",
+            settingsFile: sandboxSettingsFile,
+            mcpConfigFile,
+            strictMcpConfig: true,
+          }
+        );
+      } finally {
+        cleanupReviewMcpConfig(mcpConfigFile);
       }
-    );
+    } finally {
+      isolation.cleanup();
+    }
   } finally {
     cleanupSandboxSettings(sandboxSettingsFile);
   }
@@ -825,11 +870,12 @@ function buildReviewRequest({
   base,
   scope,
   model,
+  effort,
   focusText,
   reviewName,
   markViewedOnSuccess
 }) {
-  return { cwd, base, scope, model, focusText, reviewName, markViewedOnSuccess };
+  return { cwd, base, scope, model, effort, focusText, reviewName, markViewedOnSuccess };
 }
 
 function spawnDetachedReviewWorker(cwd, jobId) {
@@ -1183,7 +1229,7 @@ async function resolveLatestResumableSession(cwd, options = {}) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd", "view-state", "job-id", "owner-session-id"],
+    valueOptions: ["base", "scope", "model", "effort", "cwd", "view-state", "job-id", "owner-session-id"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -1204,6 +1250,10 @@ async function handleReviewCommand(argv, config) {
     options["view-state"],
     Boolean(options.background)
   );
+
+  const requestedModel = normalizeRequestedModel(options.model);
+  const resolvedModel = resolveDefaultModel(requestedModel);
+  const resolvedEffort = resolveDefaultEffort(resolvedModel, options.effort);
 
   await withReleasedReservation(workspaceRoot, explicitJobId, async () => {
     // Validate inside the reservation guard so failures do not leak markers.
@@ -1227,7 +1277,8 @@ async function handleReviewCommand(argv, config) {
         cwd,
         base: options.base,
         scope: options.scope,
-        model: options.model,
+        model: resolvedModel,
+        effort: resolvedEffort,
         focusText,
         reviewName: config.reviewName,
         markViewedOnSuccess
@@ -1248,7 +1299,8 @@ async function handleReviewCommand(argv, config) {
           cwd,
           base: options.base,
           scope: options.scope,
-          model: options.model,
+          model: resolvedModel,
+          effort: resolvedEffort,
           focusText,
           reviewName: config.reviewName,
           onProgress: progress,
@@ -1300,8 +1352,10 @@ async function handleTask(argv) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
 
-  const model = normalizeRequestedModel(options.model);
-  const effort = resolveEffort(options.effort) ?? null;
+  const requestedModel = normalizeRequestedModel(options.model);
+  const model = resolveDefaultModel(requestedModel);
+  const resolvedEffort = resolveDefaultEffort(model, options.effort);
+  const effort = resolvedEffort ? resolveEffort(resolvedEffort) : null;
   const prompt = readTaskPrompt(cwd, options, positionals);
   const markViewedOnSuccess = resolveMarkViewedOnSuccess(
     options["view-state"],
@@ -1819,9 +1873,18 @@ async function main() {
     case "cancel":
       await handleCancel(argv);
       break;
+    case "mcp-git":
+      await handleMcpGit(argv);
+      break;
     default:
       throw new Error(`Unknown subcommand: ${subcommand}`);
   }
+}
+
+async function handleMcpGit(_argv) {
+  const { runMcpGitServer } = await import("./lib/mcp-git.mjs");
+  const exitCode = await runMcpGitServer();
+  process.exit(exitCode ?? 0);
 }
 
 main().catch((error) => {
