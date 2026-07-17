@@ -29,7 +29,12 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
-import { resolveCodexHome } from "./lib/codex-paths.mjs";
+import {
+  resolveCodexHome,
+  resolveExpectedPluginDataRoot,
+  resolvePluginCacheInstallInfo,
+  resolveWritablePluginDataRoots,
+} from "./lib/codex-paths.mjs";
 import {
   getClaudeAvailability,
   getClaudeAuthStatus,
@@ -62,6 +67,7 @@ import {
 import { binaryAvailable, getProcessIdentity } from "./lib/process.mjs";
 import { callCodexAppServer } from "./lib/codex-app-server.mjs";
 import {
+  ensureCodexWritableRoots,
   ensureNativePluginHooksEnabled,
   nativePluginHooksStatus,
 } from "./lib/codex-config.mjs";
@@ -69,6 +75,7 @@ import { loadPromptTemplate, interpolateTemplate } from "./lib/prompts.mjs";
 import { parseStructuredOutput } from "./lib/structured-output.mjs";
 import {
   ACTIVE_JOB_STATUSES,
+  ensureStateDir,
   generateJobId,
   getConfig,
   getCurrentSession,
@@ -98,6 +105,7 @@ import {
   createJobProgressUpdater,
   createJobRecord,
   createProgressReporter,
+  createWorkerLogStdio,
   nowIso,
   runTrackedJob,
   SESSION_ID_ENV
@@ -117,7 +125,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const STOP_REVIEW_TASK_MARKER = "Run a turn-end gate review of the previous Codex turn.";
 const CODEX_DIR = resolveCodexHome();
 const CODEX_CONFIG_TOML = path.join(CODEX_DIR, "config.toml");
 // ---------------------------------------------------------------------------
@@ -360,29 +368,9 @@ function configureNativePluginHooks() {
   return changed;
 }
 
-function currentPluginCacheInstallInfo() {
-  const cacheRoot = path.join(CODEX_DIR, "plugins", "cache");
-  const relativePath = path.relative(cacheRoot, ROOT_DIR);
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    return null;
-  }
-  const [marketplaceName, pluginName, version] = relativePath
-    .split(path.sep)
-    .filter(Boolean);
-  if (!marketplaceName || pluginName !== "cc" || !version) {
-    return null;
-  }
-  return {
-    marketplaceName,
-    pluginName,
-    version,
-    pluginId: `${pluginName}@${marketplaceName}`,
-  };
-}
-
 function shouldRepairPluginHookTrust() {
   return (
-    Boolean(currentPluginCacheInstallInfo()) ||
+    Boolean(resolvePluginCacheInstallInfo()) ||
     process.env.CC_PLUGIN_CODEX_FORCE_HOOK_TRUST === "1"
   );
 }
@@ -417,7 +405,7 @@ function hookNeedsTrust(hook) {
 }
 
 async function repairNativePluginHookTrust(cwd) {
-  const pluginInfo = currentPluginCacheInstallInfo();
+  const pluginInfo = resolvePluginCacheInstallInfo();
   if (!shouldRepairPluginHookTrust()) {
     return {
       attempted: false,
@@ -549,13 +537,22 @@ function ensureClaudeReady(cwd) {
   }
 }
 
-function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
+function buildSetupReport(
+  cwd,
+  actionsTaken = [],
+  hookTrust = null,
+  {
+    pluginStateReady = true,
+    pluginStateDetail = "plugin-data writable root verified",
+    pluginStateNextStep = null,
+    pluginConfig = null,
+  } = {}
+) {
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
   const claudeStatus = getClaudeAvailability(cwd);
   const authStatus = getClaudeAuthStatus(cwd);
   const hooksStatus = checkHooksStatus();
-  const config = getConfig(workspaceRoot);
+  const config = pluginStateReady ? pluginConfig : null;
 
   const nextSteps = [];
   if (!claudeStatus.available) {
@@ -570,9 +567,14 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
   if (hookTrust?.ready === false) {
     nextSteps.push("Open `/hooks` and trust this plugin's hooks manually, then rerun `$cc:setup`.");
   }
-  if (!config.stopReviewGate) {
+  if (!pluginStateReady) {
     nextSteps.push(
-      "Optional: run `$cc:setup --enable-review-gate` to require a fresh review before stop."
+      pluginStateNextStep ??
+        "Repair plugin-data write access, then rerun `$cc:setup`."
+    );
+  } else if (!config?.stopReviewGate) {
+    nextSteps.push(
+      "Optional: run `$cc:setup --enable-review-gate` to require a fresh Claude review before each edit-producing Codex turn finishes."
     );
   }
 
@@ -582,13 +584,18 @@ function buildSetupReport(cwd, actionsTaken = [], hookTrust = null) {
       claudeStatus.available &&
       authStatus.loggedIn &&
       hooksStatus.installed &&
-      hookTrust?.ready !== false,
+      hookTrust?.ready !== false &&
+      pluginStateReady,
     node: nodeStatus,
     claude: claudeStatus,
     auth: authStatus,
     hooks: hooksStatus,
     hookTrust,
-    reviewGateEnabled: Boolean(config.stopReviewGate),
+    pluginState: {
+      ready: pluginStateReady,
+      detail: pluginStateDetail,
+    },
+    reviewGateEnabled: config ? Boolean(config.stopReviewGate) : null,
     actionsTaken,
     nextSteps
   };
@@ -624,15 +631,88 @@ async function handleSetup(argv) {
     actionsTaken.push(`Trusted ${hookTrust.trusted} native Codex plugin hooks.`);
   }
 
-  if (options["enable-review-gate"]) {
-    setConfig(workspaceRoot, "stopReviewGate", true);
-    actionsTaken.push(`Enabled the stop-time review gate for ${workspaceRoot}.`);
-  } else if (options["disable-review-gate"]) {
-    setConfig(workspaceRoot, "stopReviewGate", false);
-    actionsTaken.push(`Disabled the stop-time review gate for ${workspaceRoot}.`);
+  const pluginDataRoot = resolveExpectedPluginDataRoot();
+  const pluginDataRoots = resolveWritablePluginDataRoots(pluginDataRoot);
+  let writableRootChanged = false;
+  let pluginStateReady = true;
+  let pluginStateDetail = `plugin data roots verified: ${pluginDataRoots.join(", ")}`;
+  let pluginStateNextStep = null;
+  let pluginConfig = null;
+  const recordPluginStateFailure = (error) => {
+    pluginStateReady = false;
+    pluginStateDetail = `unable to access plugin state: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    pluginStateNextStep =
+      "Restart Codex so the plugin-data writable roots take effect, then rerun `$cc:setup`.";
+  };
+  try {
+    writableRootChanged = await ensureCodexWritableRoots(cwd, pluginDataRoots);
+  } catch (error) {
+    pluginStateReady = false;
+    pluginStateDetail = `unable to configure plugin data roots: ${
+      error instanceof Error ? error.message : String(error)
+    }`;
+    pluginStateNextStep =
+      `Allow ${pluginDataRoots.join(", ")} under ` +
+      "`sandbox_workspace_write.writable_roots` in `~/.codex/config.toml`, " +
+      "restart Codex, then rerun `$cc:setup`.";
+  }
+  if (writableRootChanged) {
+    pluginStateReady = false;
+    pluginStateDetail =
+      `plugin data roots added; restart required: ${pluginDataRoots.join(", ")}`;
+    pluginStateNextStep =
+      "Restart Codex so the new plugin-data writable root takes effect, then rerun `$cc:setup`.";
+    actionsTaken.push(
+      `Allowed plugin state writes under ${pluginDataRoots.join(", ")}.`
+    );
+    actionsTaken.push("Restart Codex so existing sessions use the updated writable roots.");
   }
 
-  const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust);
+  if (pluginStateReady) {
+    try {
+      ensureStateDir(workspaceRoot);
+      pluginConfig = getConfig(workspaceRoot);
+    } catch (error) {
+      recordPluginStateFailure(error);
+    }
+  }
+
+  const reviewGateChangeRequested =
+    options["enable-review-gate"] || options["disable-review-gate"];
+  if (!pluginStateReady && reviewGateChangeRequested) {
+    actionsTaken.push(
+      "Deferred the review-gate change until plugin state write access is ready."
+    );
+  } else if (options["enable-review-gate"]) {
+    try {
+      pluginConfig = setConfig(workspaceRoot, "stopReviewGate", true);
+      actionsTaken.push(`Enabled the turn-end review gate for ${workspaceRoot}.`);
+    } catch (error) {
+      recordPluginStateFailure(error);
+      actionsTaken.push(
+        "Deferred the review-gate change until plugin state write access is ready."
+      );
+    }
+  } else if (options["disable-review-gate"]) {
+    try {
+      pluginConfig = setConfig(workspaceRoot, "stopReviewGate", false);
+      actionsTaken.push(`Disabled the turn-end review gate for ${workspaceRoot}.`);
+    } catch (error) {
+      recordPluginStateFailure(error);
+      actionsTaken.push(
+        "Deferred the review-gate change until plugin state write access is ready."
+      );
+    }
+  }
+
+  const finalReport = buildSetupReport(cwd, actionsTaken, hookTrust, {
+    pluginStateReady,
+    pluginStateDetail,
+    pluginStateNextStep,
+    pluginConfig,
+  });
   outputResult(
     options.json ? finalReport : renderSetupReport(finalReport),
     options.json
@@ -867,8 +947,8 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
     String(prompt ?? "").includes(STOP_REVIEW_TASK_MARKER)
   ) {
     return {
-      title: "Claude Code Stop Gate Review",
-      summary: "Stop-gate review of previous Claude turn"
+      title: "Claude Code Turn-End Gate Review",
+      summary: "Turn-end gate review of previous Codex turn"
     };
   }
 
@@ -1080,21 +1160,26 @@ function buildReviewRequest({
   return { cwd, base, scope, model, effort, focusText, reviewName, markViewedOnSuccess };
 }
 
-function spawnDetachedReviewWorker(cwd, jobId) {
+function spawnDetachedWorker(cwd, command, jobId, logFile) {
   const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "review-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
-  child.unref();
-  return child;
+  const workerLog = createWorkerLogStdio(logFile);
+  try {
+    const child = spawn(
+      process.execPath,
+      [scriptPath, command, "--cwd", cwd, "--job-id", jobId],
+      {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: workerLog.stdio,
+        windowsHide: true
+      }
+    );
+    child.unref();
+    return child;
+  } finally {
+    workerLog.close();
+  }
 }
 
 function enqueueBackgroundReview(cwd, job, request) {
@@ -1111,7 +1196,7 @@ function enqueueBackgroundReview(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedReviewWorker(cwd, job.id);
+  const child = spawnDetachedWorker(cwd, "review-worker", job.id, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {
@@ -1289,23 +1374,6 @@ async function runForegroundCommand(job, runner, options = {}) {
 // Background task spawning
 // ---------------------------------------------------------------------------
 
-function spawnDetachedTaskWorker(cwd, jobId) {
-  const scriptPath = path.join(ROOT_DIR, "scripts", "claude-companion.mjs");
-  const child = spawn(
-    process.execPath,
-    [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId],
-    {
-      cwd,
-      env: process.env,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    }
-  );
-  child.unref();
-  return child;
-}
-
 function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
@@ -1320,7 +1388,7 @@ function enqueueBackgroundTask(cwd, job, request) {
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  const child = spawnDetachedWorker(cwd, "task-worker", job.id, logFile);
   if (child.pid != null) {
     let pidIdentity = null;
     try {

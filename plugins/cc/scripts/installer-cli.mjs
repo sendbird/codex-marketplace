@@ -11,8 +11,16 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { callCodexAppServer } from "./lib/codex-app-server.mjs";
-import { ensureNativePluginHooksEnabled } from "./lib/codex-config.mjs";
-import { resolveCodexHome } from "./lib/codex-paths.mjs";
+import {
+  ensureCodexWritableRoots,
+  ensureNativePluginHooksEnabled,
+  removeCodexWritableRoots,
+} from "./lib/codex-config.mjs";
+import {
+  resolveCodexHome,
+  resolveMarketplacePluginDataRoot,
+  resolveWritablePluginDataRoots,
+} from "./lib/codex-paths.mjs";
 import {
   LEGACY_MARKETPLACE_NAME,
   listManagedPluginCacheEntries,
@@ -211,23 +219,54 @@ async function installOrUpdate() {
     "marketplace.json"
   );
   await installPluginThroughCodex(marketplacePath);
+  const installedMarketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
+  const installedMarketplaceName =
+    marketplace.marketplaceName ??
+    installedMarketplace.name ??
+    marketplaceConfig.marketplaceName;
+  const pluginDataRoot = resolveMarketplacePluginDataRoot(installedMarketplaceName);
+  const pluginDataRoots = resolveWritablePluginDataRoots(pluginDataRoot);
+  const writableRootChanged = await ensureCodexWritableRoots(
+    PACKAGE_ROOT,
+    pluginDataRoots
+  );
 
   console.log(`Installed ${PLUGIN_NAME} from ${marketplaceConfig.source} into the Codex plugin cache.`);
   if (hooksChanged) {
     console.log("Enabled [features].hooks and [features].plugin_hooks in ~/.codex/config.toml.");
-    console.log("Restart Codex to make newly enabled native plugin hooks active in existing sessions.");
+  }
+  if (writableRootChanged) {
+    console.log(`Allowed plugin state writes under ${pluginDataRoots.join(", ")}.`);
+  }
+  if (hooksChanged || writableRootChanged) {
+    console.log("Restart Codex so existing sessions use the updated plugin configuration.");
   }
 }
 
 async function uninstall() {
   const marketplaceConfig = resolveInstallerMarketplaceConfig();
   cleanupLegacyLocalInstall();
+  const marketplaceNames = [
+    ...new Set([
+      marketplaceConfig.marketplaceName,
+      DEFAULT_MARKETPLACE_NAME,
+      LEGACY_MARKETPLACE_NAME,
+      ...listManagedPluginCacheEntries(CODEX_HOME).map(
+        (entry) => entry.marketplaceName
+      ),
+    ]),
+  ];
+  const pluginDataRoots = marketplaceNames.flatMap((marketplaceName) => {
+    try {
+      return resolveWritablePluginDataRoots(
+        resolveMarketplacePluginDataRoot(marketplaceName)
+      );
+    } catch {
+      return [];
+    }
+  });
 
-  for (const marketplaceName of [
-    marketplaceConfig.marketplaceName,
-    DEFAULT_MARKETPLACE_NAME,
-    LEGACY_MARKETPLACE_NAME,
-  ]) {
+  for (const marketplaceName of marketplaceNames) {
     try {
       await uninstallPluginThroughCodex(marketplaceName);
     } catch {
@@ -235,6 +274,18 @@ async function uninstall() {
     }
   }
   removeManagedPluginConfigSections();
+
+  try {
+    if (await removeCodexWritableRoots(PACKAGE_ROOT, pluginDataRoots)) {
+      console.log("Removed plugin data roots from Codex writable-root config.");
+    }
+  } catch (error) {
+    console.error(
+      `Warning: unable to remove plugin data roots from Codex writable-root config: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
 
   for (const cacheEntry of listManagedPluginCacheEntries(CODEX_HOME)) {
     fs.rmSync(cacheEntry.cachePath, { recursive: true, force: true });

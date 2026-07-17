@@ -22,6 +22,7 @@ import {
   resolvePluginDataRoot,
   resolvePluginStateRoot,
   resolvePluginsDataRoot,
+  samePath,
 } from "./codex-paths.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 import { isProcessAlive, validateProcessIdentity, getProcessIdentity } from "./process.mjs";
@@ -31,6 +32,8 @@ let ensuredPluginDataRoot = null;
 const CONFIG_FILE_NAME = "config.json";
 const JOBS_DIR_NAME = "jobs";
 const CURRENT_SESSION_FILE_NAME = "current-session.json";
+const CURRENT_SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const CURRENT_SESSION_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const STOP_REVIEW_LAST_FILE_NAME = "stop-review-last.json";
 const STOP_REVIEW_HISTORY_FILE_NAME = "stop-review-history.jsonl";
 const TURN_BASELINE_FILE_PREFIX = "turn-baseline";
@@ -77,6 +80,14 @@ function removeIfEmpty(dirPath) {
   } catch {}
 }
 
+function canonicalPath(candidate) {
+  try {
+    return fs.realpathSync.native(candidate);
+  } catch {
+    return path.resolve(candidate);
+  }
+}
+
 function mergeDirectory(sourceDir, destinationDir) {
   fs.mkdirSync(destinationDir, { recursive: true, mode: 0o700 });
 
@@ -116,7 +127,10 @@ function migrateLegacyPluginDataRoots() {
 
   for (const legacyNamespace of LEGACY_PLUGIN_DATA_NAMESPACES) {
     const legacyRoot = resolvePluginDataRoot(legacyNamespace);
-    if (!fs.existsSync(legacyRoot) || legacyRoot === destinationRoot) {
+    if (
+      !fs.existsSync(legacyRoot) ||
+      samePath(canonicalPath(legacyRoot), canonicalPath(destinationRoot))
+    ) {
       continue;
     }
 
@@ -266,6 +280,16 @@ export function getCurrentSession(cwd) {
   const filePath = resolveCurrentSessionFile(cwd);
   try {
     const payload = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const updatedAt = Date.parse(payload.updatedAt);
+    const ageMs = Date.now() - updatedAt;
+    if (
+      !Number.isFinite(updatedAt) ||
+      ageMs > CURRENT_SESSION_MAX_AGE_MS ||
+      ageMs < -CURRENT_SESSION_MAX_CLOCK_SKEW_MS
+    ) {
+      fs.unlinkSync(filePath);
+      return null;
+    }
     return sanitizeId(payload.sessionId, "session ID");
   } catch {
     return null;

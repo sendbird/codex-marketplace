@@ -24,6 +24,7 @@ Foreground contract:
 Background contract:
 - Use `background-routing-context --kind review --json` before spawning the forwarding child.
 - Preserve `--job-id` only when reserved by the parent helper.
+- Whenever preserving that reserved `--job-id`, also pass `--cwd <workspace-root>` using `workspaceRoot` from the same helper response. Reserved job ids are workspace-scoped.
 - Preserve `--owner-session-id` only when the parent helper returned a non-empty owner session id.
 - Preserve the parent notification path only when the helper returned a non-empty parent thread id.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.

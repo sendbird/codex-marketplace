@@ -11,7 +11,13 @@ import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
 import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
-import { getConfig, listJobs, patchJob, writeTurnBaseline } from "../scripts/lib/state.mjs";
+import {
+  getConfig,
+  listJobs,
+  patchJob,
+  setCurrentSession,
+  writeTurnBaseline,
+} from "../scripts/lib/state.mjs";
 import { getWorkingTreeFingerprint } from "../scripts/lib/git.mjs";
 import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
@@ -56,12 +62,12 @@ function buildAdditionalContext(jobs) {
   ].join("\n");
 }
 
-function selectUnreadCompletedJobs(workspaceRoot, sessionId) {
+function selectUnreadCompletedJobs(jobs, sessionId) {
   if (!sessionId) {
     return [];
   }
 
-  return listJobs(workspaceRoot)
+  return jobs
     .filter((job) => job.sessionId === sessionId)
     .filter((job) => job.status === "completed")
     .filter((job) => !job.resultViewedAt)
@@ -79,6 +85,17 @@ function markJobsNotified(workspaceRoot, jobs) {
     patchJob(workspaceRoot, job.id, {
       notifiedAt: timestamp,
     });
+  }
+}
+
+function listJobsSafely(workspaceRoot) {
+  try {
+    // listJobs() triggers the PID-reuse-safe stale job reaper.
+    return listJobs(workspaceRoot);
+  } catch {
+    // Best effort only: unread-result steering should not fail a user prompt
+    // because stale job reaping hit a filesystem or process-inspection race.
+    return [];
   }
 }
 
@@ -116,22 +133,28 @@ async function main() {
     return;
   }
 
+  try {
+    setCurrentSession(workspaceRoot, sessionId);
+  } catch {
+    // Best effort only: an invalid session id should not fail a user prompt.
+  }
   const config = getConfig(workspaceRoot);
   if (config.stopReviewGate) {
     captureTurnBaseline(workspaceRoot, sessionId, cwd);
   }
+  const jobs = listJobsSafely(workspaceRoot);
 
   if (isExplicitClaudeStatusRequest(prompt)) {
     return;
   }
 
-  const jobs = selectUnreadCompletedJobs(workspaceRoot, sessionId);
-  if (jobs.length === 0) {
+  const unreadJobs = selectUnreadCompletedJobs(jobs, sessionId);
+  if (unreadJobs.length === 0) {
     return;
   }
 
-  markJobsNotified(workspaceRoot, jobs);
-  process.stdout.write(`${buildAdditionalContext(jobs)}\n`);
+  markJobsNotified(workspaceRoot, unreadJobs);
+  process.stdout.write(`${buildAdditionalContext(unreadJobs)}\n`);
 }
 
 main().catch((error) => {

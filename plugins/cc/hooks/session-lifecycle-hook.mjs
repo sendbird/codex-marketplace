@@ -10,8 +10,6 @@
  *
  * SessionStart: Exports CLAUDE_COMPANION_SESSION_ID via CLAUDE_ENV_FILE.
  *
- * SessionEnd:   Cleans up tracked jobs for the session, kills orphan `claude` processes.
- *
  * No broker lifecycle — Claude Code uses direct CLI invocation.
  */
 
@@ -22,17 +20,8 @@ import { fileURLToPath } from "node:url";
 
 import { readHookInput } from "./lib/hook-input.mjs";
 import { cleanupAfterOfficialUninstall } from "./lib/plugin-install-guard.mjs";
-import { terminateProcessTree, validateProcessIdentity } from "../scripts/lib/process.mjs";
-import {
-  ACTIVE_JOB_STATUSES,
-  clearCurrentSession,
-  getCurrentSession,
-  listStoredJobs,
-  setCurrentSession,
-  transitionJob,
-} from "../scripts/lib/state.mjs";
-import { nowIso, SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
-import { resolveWorkspaceRoot } from "../scripts/lib/workspace.mjs";
+import { setCurrentSession } from "../scripts/lib/state.mjs";
+import { SESSION_ID_ENV } from "../scripts/lib/tracked-jobs.mjs";
 
 export { SESSION_ID_ENV };
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
@@ -63,67 +52,6 @@ function isNestedCodexSession(inputSessionId) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Session cleanup
-// ---------------------------------------------------------------------------
-
-function cleanupSessionJobs(cwd, sessionId) {
-  if (!cwd || !sessionId) {
-    return;
-  }
-
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = listStoredJobs(workspaceRoot);
-  const sessionJobs = jobs.filter((job) => job.sessionId === sessionId);
-  if (sessionJobs.length === 0) {
-    return;
-  }
-
-  for (const job of sessionJobs) {
-    const stillRunning = ACTIVE_JOB_STATUSES.has(job.status);
-    if (!stillRunning) {
-      continue;
-    }
-    const hasPid = Number.isFinite(job.pid);
-    const hasTrustedPid =
-      hasPid &&
-      typeof job.pidIdentity === "string" &&
-      job.pidIdentity &&
-      validateProcessIdentity(job.pid, job.pidIdentity);
-    const canSafelyCancel = !hasPid || hasTrustedPid;
-    try {
-      if (hasTrustedPid) {
-        terminateProcessTree(job.pid);
-      }
-    } catch {
-      // Ignore teardown failures during session shutdown.
-    }
-    try {
-      transitionJob(
-        workspaceRoot,
-        job.id,
-        [job.status],
-        canSafelyCancel ? "cancelled" : "cancel_failed",
-        {
-        completedAt: nowIso(),
-        errorMessage: canSafelyCancel
-          ? "Cancelled when the Codex session ended."
-          : "Refused to terminate a stored process without a matching PID identity.",
-        pid: canSafelyCancel ? null : job.pid ?? null,
-        pidIdentity: canSafelyCancel ? null : job.pidIdentity ?? null,
-        phase: canSafelyCancel ? "cancelled" : "cancel_failed",
-      }
-      );
-    } catch {
-      // Ignore state transition races during session shutdown.
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
-
 function handleSessionStart(input) {
   const cwd = input.cwd || process.cwd();
   const nestedSession = isNestedCodexSession(input.session_id);
@@ -134,24 +62,6 @@ function handleSessionStart(input) {
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
   if (input.session_id && !nestedSession) {
     setCurrentSession(cwd, input.session_id);
-  }
-}
-
-function handleSessionEnd(input) {
-  const cwd = input.cwd || process.cwd();
-  let sessionId = input.session_id || process.env[SESSION_ID_ENV] || null;
-  if (!sessionId) {
-    try {
-      sessionId = getCurrentSession(resolveWorkspaceRoot(cwd));
-    } catch {
-      sessionId = null;
-    }
-  }
-
-  // Clean up tracked jobs for this session
-  cleanupSessionJobs(cwd, sessionId);
-  if (sessionId) {
-    clearCurrentSession(cwd, sessionId);
   }
 }
 
@@ -169,11 +79,6 @@ async function main() {
   if (eventName === "SessionStart" || !eventName) {
     // Default to SessionStart (Codex invokes this on session start)
     handleSessionStart(input);
-    return;
-  }
-
-  if (eventName === "SessionEnd") {
-    handleSessionEnd(input);
   }
 }
 
