@@ -234,7 +234,14 @@ export function renderSetupReport(report) {
     `- auth: ${report.auth.detail}`,
     `- hooks: ${report.hooks.detail}`,
     ...(report.hookTrust ? [`- hook trust: ${report.hookTrust.detail}`] : []),
-    `- review gate: ${report.reviewGateEnabled ? "enabled" : "disabled"}`,
+    ...(report.pluginState ? [`- plugin state: ${report.pluginState.detail}`] : []),
+    `- review gate: ${
+      report.reviewGateEnabled == null
+        ? "check after restart"
+        : report.reviewGateEnabled
+          ? "enabled"
+          : "disabled"
+    }`,
     "",
   ];
   if (report.actionsTaken.length > 0) {

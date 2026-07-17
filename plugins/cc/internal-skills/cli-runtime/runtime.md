@@ -28,6 +28,7 @@ Routing controls:
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
+- Whenever the command includes a reserved `--job-id`, also include `--cwd <workspace-root>` using `workspaceRoot` from the same routing-context response. Reserved job ids are workspace-scoped.
 - Never emit an empty routing placeholder such as `--owner-session-id  --job-id`.
 - Do not add `--quiet-progress` by default for built-in rescue forwarding. Let companion stderr progress remain available in the spawned agent thread.
 - If the free-text task begins with `/`, treat that slash command as literal Claude Code task text to forward unchanged. Do not execute it as a local Codex slash command or answer it inline.
