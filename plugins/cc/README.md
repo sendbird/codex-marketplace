@@ -117,17 +117,20 @@ Quick routing rule:
 Standard read-only review of your current work.
 
 ```text
-$cc:review                          # review uncommitted changes (default: opus + xhigh effort)
+$cc:review                          # review uncommitted changes (default: opus + high effort)
 $cc:review --base main              # review branch vs main
 $cc:review --scope branch           # explicitly compare branch tip to base
 $cc:review --background             # run in background, check with $cc:status later
 $cc:review --model sonnet           # switch to sonnet (defaults to high effort)
-$cc:review --model opus --effort high   # opus with a lighter effort
+$cc:review --model fable            # use Fable (defaults to high effort)
+$cc:review --model opus --effort xhigh  # explicitly raise opus effort
 ```
 
-**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|max>`
+**Flags:** `--base <ref>`, `--scope <auto|working-tree|branch>`, `--wait`, `--background`, `--model <model>`, `--effort <low|medium|high|xhigh|max>`
 
-**Defaults:** model `opus` (resolves to `claude-opus-4-7[1m]`, the 1M-context variant) with `xhigh` effort. If you pick `sonnet`, it resolves to `claude-sonnet-4-6[1m]` (also 1M context) and the default effort drops to `high`. `haiku` resolves to `claude-haiku-4-5` and has no effort setting. Pass `--model` and `--effort` to override.
+**Defaults:** model `opus` with `high` effort. After trimming surrounding whitespace, the friendly aliases `fable`, `opus`, `sonnet`, and `haiku` are matched case-insensitively and canonicalized to lowercase; every friendly alias defaults to `high` effort. Every other `--model` value passes through unchanged for Claude Code to resolve, including full model IDs and provider-specific names, and receives no inferred effort. Pass `--model` and `--effort` to override.
+
+**Model discovery:** run `/model` in Claude Code to see the models and effort levels available to your current account and provider, then pass the selected alias or full ID to this plugin. The plugin intentionally does not maintain a static model catalog or force `[1m]`; Claude Code owns alias versions, managed restrictions, provider routing, and extended-context eligibility.
 
 Scope `auto` (the default) inspects `git status` and chooses between working-tree and branch automatically.
 
@@ -171,8 +174,8 @@ $cc:rescue --model sonnet --effort medium investigate the flaky test
 | `--resume-last` | Alias for `--resume` |
 | `--fresh` | Force a new task (don't resume) |
 | `--write` | Allow file edits (default) |
-| `--model <model>` | Claude model (`opus`, `sonnet`, `haiku`, or full ID; defaults to `opus`. The `opus` and `sonnet` aliases resolve to their 1M-context variants `claude-opus-4-7[1m]` and `claude-sonnet-4-6[1m]`.) |
-| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `xhigh` for opus, `high` for sonnet, unset for haiku) |
+| `--model <model>` | Any Claude Code model alias, full model ID, or provider-specific name; defaults to `opus`. Run `/model` in Claude Code to discover options available to your account and provider. |
+| `--effort <level>` | Reasoning effort: `low`, `medium`, `high`, `xhigh`, `max` (default: `high` for every friendly model alias) |
 | `--prompt-file <path>` | Read task description from a file |
 
 **Resume behavior:** If you don't pass `--resume` or `--fresh`, rescue checks for a resumable Claude session and asks once whether to continue or start fresh. Your phrasing guides the recommendation — "continue the last run" → resume, "start over" → fresh.
@@ -278,7 +281,7 @@ The review gate is an **optional turn-end hook**. When enabled, Codex runs a Cla
 | **Runtime** | Codex app-server + broker | Fresh `claude -p` subprocess per invocation |
 | **Review gate trigger** | End of Claude Code turn | End of Codex turn |
 | **Review gate target** | Reviews previous Claude response | Reviews previous Codex response |
-| **Model flags** | Codex model names and effort controls | Claude model names and effort values (`low` / `medium` / `high` / `max`) |
+| **Model flags** | Codex model names and effort controls | Claude model names and effort values (`low` / `medium` / `high` / `xhigh` / `max`) |
 
 ### Where This Goes Further
 
