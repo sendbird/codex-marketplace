@@ -634,14 +634,8 @@ export function pruneStaleReviewMcpConfigs(options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Model & Effort Mapping
+// Model & Effort Selection
 // ---------------------------------------------------------------------------
-
-export const MODEL_ALIASES = new Map([
-  ["opus", "claude-opus-4-7[1m]"],
-  ["sonnet", "claude-sonnet-4-6[1m]"],
-  ["haiku", "claude-haiku-4-5"],
-]);
 
 export const EFFORT_ALIASES = {
   none: "low",
@@ -652,13 +646,13 @@ export const VALID_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 export const DEFAULT_MODEL = "opus";
 
+const FRIENDLY_ALIASES = new Set(["fable", "opus", "sonnet", "haiku"]);
+
 export const DEFAULT_EFFORT_BY_MODEL = new Map([
-  ["opus", "xhigh"],
-  ["claude-opus-4-7", "xhigh"],
-  ["claude-opus-4-7[1m]", "xhigh"],
+  ["fable", "high"],
+  ["opus", "high"],
   ["sonnet", "high"],
-  ["claude-sonnet-4-6", "high"],
-  ["claude-sonnet-4-6[1m]", "high"],
+  ["haiku", "high"],
 ]);
 
 export function resolveDefaultModel(model) {
@@ -677,8 +671,11 @@ export function resolveDefaultEffort(model, effort) {
 }
 
 export function resolveModel(model) {
-  if (!model) return undefined;
-  return MODEL_ALIASES.get(model) ?? model;
+  if (model == null) return undefined;
+  const normalized = String(model).trim();
+  if (!normalized) return undefined;
+  const canonical = normalized.toLowerCase();
+  return FRIENDLY_ALIASES.has(canonical) ? canonical : normalized;
 }
 
 export function resolveEffort(effort) {

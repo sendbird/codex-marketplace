@@ -24,7 +24,8 @@ Command selection:
 
 Routing controls:
 - Treat `--model`, `--effort`, `--resume`, `--resume-last`, `--fresh`, `--prompt-file`, `--view-state`, `--owner-session-id`, and `--job-id` as routing controls, not task text.
-- Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`, effort defaults to `xhigh` for opus, `high` for sonnet, and is left unset for haiku.
+- Leave `--model` and `--effort` unset unless the user explicitly asks for a specific model or effort. The companion command applies these defaults itself: model defaults to `opus`; fable, opus, sonnet, and haiku each default to `high` effort.
+- Forward an explicit `--model` value unchanged to the companion. The companion trims surrounding whitespace, canonicalizes the friendly aliases `fable`, `opus`, `sonnet`, and `haiku` to lowercase, then forwards every other `--model` value unchanged to Claude Code. Claude Code owns alias resolution; `/model` is the authoritative picker for the current account and provider.
 - `--view-state on-success` means the user will see this companion result in the current turn, so the companion may mark it viewed on success.
 - `--view-state defer` means the parent is not waiting, so the companion must leave the result unread until the user explicitly checks it.
 - `--owner-session-id <session-id>` is an internal parent-session routing control. Preserve it when present so tracked jobs remain visible to the parent session's `$cc:status` / `$cc:result`.
@@ -49,6 +50,7 @@ Task defaults:
 - Run the companion command as one blocking foreground shell-tool call, not as a background terminal/session.
 - Do not request a shell session id, poll a shell session later, or return before the companion command exits.
 - If the available shell tool is `exec_command`, call it once in non-interactive mode and wait for command exit in that same call.
+- When using `exec_command`, pass `sandbox_permissions: "require_escalated"` and the justification `Allow the Claude Code companion to contact the Claude API for this requested task.` on that one call. Do not first try the companion command in the default network-disabled sandbox.
 - If the parent supplied a non-empty parent thread id for background completion, allow at most one success-only `send_input` notification before finishing.
 - Mention the tool name `send_input` literally when describing that notification path.
 - Use the exact tool shape `send_input({ target: <parent-thread-id>, message: <steering-message> })`.
