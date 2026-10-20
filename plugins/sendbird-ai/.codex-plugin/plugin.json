@@ -1,0 +1,44 @@
+{
+  "name": "sendbird-ai",
+  "version": "0.1.0",
+  "description": "Sendbird AI Plugins: every Sendbird-approved MCP app through the Gestalt front door, with routing guidelines for web search, Google Workspace and artifacts.",
+  "author": {
+    "name": "Sendbird, Inc.",
+    "email": "jin.ku@sendbird.com",
+    "url": "https://sendbird.com/"
+  },
+  "homepage": "https://github.com/sendbird-ai/gestalt",
+  "repository": "https://github.com/sendbird/codex-marketplace",
+  "license": "Apache-2.0",
+  "keywords": [
+    "sendbird",
+    "gestalt",
+    "mcp",
+    "firecrawl",
+    "google-workspace",
+    "automators"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Sendbird AI",
+    "shortDescription": "Sendbird's MCP apps via Gestalt",
+    "longDescription": "Connects Gestalt and Gestalt Sensitive, Sendbird's MCP front doors to Firecrawl, Google Workspace, Automators, Linear, Notion, Greenhouse and more, and tells Codex which app to use for web search, Google Docs/Sheets/Slides and artifact uploads.",
+    "developerName": "Sendbird, Inc.",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://sendbird.com/",
+    "privacyPolicyURL": "https://sendbird.com/privacy-notice",
+    "termsOfServiceURL": "https://sendbird.com/terms-of-service",
+    "defaultPrompt": [
+      "Search the web for the latest Sendbird competitor pricing and summarize it",
+      "Read this Google Sheet and add a summary tab",
+      "Upload the report I just generated as an artifact and give me the link"
+    ],
+    "brandColor": "#6210CC",
+    "screenshots": []
+  }
+}

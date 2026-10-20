@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "gestalt": {
+      "type": "http",
+      "url": "https://gestalt.sbtools.io/mcp"
+    },
+    "gestalt-sensitive": {
+      "type": "http",
+      "url": "https://gestalt-sensitive.sbtools.io/mcp"
+    }
+  }
+}

@@ -15,6 +15,18 @@
         "authentication": "ON_USE"
       },
       "category": "Coding"
+    },
+    {
+      "name": "sendbird-ai",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sendbird-ai"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
     }
   ]
 }
